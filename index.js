@@ -1,6 +1,9 @@
 require("dotenv").config();
 
+const { installOrderThreadBridge } = require("./src/order-thread-bridge");
 const { client, registerAndStart } = require("./src/app");
+
+installOrderThreadBridge();
 
 if (!process.env.DISCORD_TOKEN) {
   console.error("[Shop] DISCORD_TOKEN is missing from .env");
