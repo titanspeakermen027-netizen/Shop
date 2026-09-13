@@ -3,6 +3,10 @@ const {
   GatewayIntentBits,
   PermissionFlagsBits,
   ChannelType,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require("discord.js");
 
 const store = require("./db");
@@ -28,39 +32,48 @@ const actionCooldowns = new Map();
 function admin(interaction) {
   return !!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
 }
+
 function staff(interaction, settings) {
   return admin(interaction) || (!!settings.staff_role_id && interaction.member?.roles?.cache?.has(settings.staff_role_id));
 }
+
 function sellerAllowed(interaction, settings) {
   return admin(interaction) || (!!settings.seller_role_id && interaction.member?.roles?.cache?.has(settings.seller_role_id));
 }
+
 function mentionText(settings) {
   if (settings.marketplace_mention_type === "everyone") return "@everyone";
   if (settings.marketplace_mention_type === "here") return "@here";
   if (settings.marketplace_mention_type === "roles") return settings.marketplace_mention_roles.map(id => `<@&${id}>`).join(" ");
   return "";
 }
+
 function allowedMentions(settings) {
   if (settings.marketplace_mention_type === "everyone" || settings.marketplace_mention_type === "here") return { parse: ["everyone"] };
   if (settings.marketplace_mention_type === "roles") return { roles: settings.marketplace_mention_roles };
   return { parse: [] };
 }
+
 function sanitize(text) {
   return String(text || "")
     .replace(/<@&\d+>|<@!?\d+>|@everyone|@here/g, "")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
 }
+
 function normalizeText(text, max) {
   const cleaned = sanitize(text);
   return cleaned.length > max ? cleaned.slice(0, max - 1) + "…" : cleaned;
 }
+
 function channelList(guildId) {
   return store.db.prepare("SELECT channel_id FROM marketplace_channels WHERE guild_id = ? ORDER BY created_at").all(guildId).map(r => r.channel_id);
 }
+
 function isMarketplace(guildId, channelId) {
   return channelList(guildId).includes(channelId);
 }
+
 function setMarketplaceChannel(guildId, channelId, add) {
   if (add) {
     store.db.prepare("INSERT OR IGNORE INTO marketplace_channels (guild_id,channel_id,created_at) VALUES (?,?,?)").run(guildId, channelId, new Date().toISOString());
@@ -89,7 +102,17 @@ function commandDefinitions() {
     },
     {
       name: "settings", description: "إعدادات Shop", options: [
-        ...["shop-channel","orders-category","staff-role","work-threads-channel","reports-channel","offers-channel","seller-role","verified-seller-role"].map((name) => ({ type: 1, name, description: `إعداد ${name}`, options: [{ type: ["staff-role","seller-role","verified-seller-role"].includes(name) ? 8 : name === "orders-category" ? 7 : 7, name: name === "orders-category" ? "category" : ["staff-role","seller-role","verified-seller-role"].includes(name) ? "role" : "channel", description: "الاختيار", required: true }] })),
+        ...["shop-channel","orders-category","staff-role","work-threads-channel","reports-channel","offers-channel","seller-role","verified-seller-role"].map(name => ({
+          type: 1,
+          name,
+          description: `إعداد ${name}`,
+          options: [{
+            type: ["staff-role","seller-role","verified-seller-role"].includes(name) ? 8 : 7,
+            name: name === "orders-category" ? "category" : ["staff-role","seller-role","verified-seller-role"].includes(name) ? "role" : "channel",
+            description: "الاختيار",
+            required: true,
+          }],
+        })),
         { type: 1, name: "show", description: "عرض الإعدادات" },
       ]
     },
@@ -116,29 +139,62 @@ function commandDefinitions() {
 }
 
 async function safeReply(interaction, payload) {
-  if (interaction.deferred || interaction.replied) return interaction.followUp(payload).catch(() => {});
-  return interaction.reply(payload).catch(() => {});
+  try {
+    if (interaction.deferred || interaction.replied) return await interaction.followUp(payload);
+    return await interaction.reply(payload);
+  } catch (error) {
+    console.error("[Shop] reply error:", error);
+    return null;
+  }
+}
+
+function settingTarget(interaction, sub) {
+  const maps = {
+    "shop-channel": ["shop_channel_id", "channel"],
+    "orders-category": ["orders_category_id", "channel"],
+    "staff-role": ["staff_role_id", "role"],
+    "work-threads-channel": ["work_threads_channel_id", "channel"],
+    "reports-channel": ["reports_channel_id", "channel"],
+    "offers-channel": ["offers_channel_id", "channel"],
+    "seller-role": ["seller_role_id", "role"],
+    "verified-seller-role": ["verified_seller_role_id", "role"],
+  };
+  const [field, type] = maps[sub] || [];
+  if (!field) return null;
+  const target = type === "role"
+    ? interaction.options.getRole("role")
+    : interaction.options.getChannel(type === "channel" ? (sub === "orders-category" ? "category" : "channel") : "channel");
+  return target ? { field, target } : null;
 }
 
 async function createOrderFromOffer(interaction, offer) {
   const settings = store.settings(interaction.guild.id);
   if (store.hasOpenOrder(interaction.guild.id, interaction.user.id)) return safeReply(interaction, { content: "❌ عندك طلب مفتوح بالفعل. كملو أو سدو قبل تفتح واحد جديد.", ephemeral: true });
+
   const channel = await interaction.guild.channels.create({
     name: `order-${offer.public_id}`,
     type: ChannelType.GuildText,
     parent: settings.orders_category_id || null,
-    topic: `Order #${offer.public_id} • Offer #${offer.public_id} • Buyer ${interaction.user.id} • Seller ${offer.seller_id}`,
+    topic: `Order #${offer.public_id} • Buyer ${interaction.user.id} • Seller ${offer.seller_id}`,
     permissionOverwrites: [
       { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
       { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
       { id: offer.seller_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
     ],
-  }).catch(() => null);
+  }).catch(error => { console.error("[Shop] offer order channel error:", error); return null; });
+
   if (!channel) return safeReply(interaction, { content: "❌ ما قدرتش ننشئ غرفة الطلب. راجع صلاحيات البوت والقسم.", ephemeral: true });
   if (settings.staff_role_id) await channel.permissionOverwrites.edit(settings.staff_role_id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true }).catch(() => {});
-  const order = store.createOrder({ guildId: interaction.guild.id, channelId: channel.id, buyerId: interaction.user.id, sellerId: offer.seller_id, offerId: offer.id, orderType: offer.category });
-  const embed = ui.orderControls ? new (require("discord.js").EmbedBuilder)() : null;
-  const { EmbedBuilder } = require("discord.js");
+
+  let order;
+  try {
+    order = store.createOrder({ guildId: interaction.guild.id, channelId: channel.id, buyerId: interaction.user.id, sellerId: offer.seller_id, offerId: offer.id, orderType: offer.category });
+  } catch (error) {
+    console.error("[Shop] offer order database error:", error);
+    await channel.delete().catch(() => {});
+    return safeReply(interaction, { content: "❌ وقع مشكل فحفظ الطلب. عاود المحاولة.", ephemeral: true });
+  }
+
   await channel.send({
     content: `<@${interaction.user.id}> <@${offer.seller_id}>`,
     embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`🛒 Order #${order.public_id}`).setDescription([
@@ -153,9 +209,10 @@ async function createOrderFromOffer(interaction, offer) {
     ].join("\n")).setTimestamp()],
     components: [ui.orderControls(channel.id)],
     allowedMentions: { users: [interaction.user.id, offer.seller_id] },
-  });
+  }).catch(error => console.error("[Shop] order message error:", error));
+
   await interaction.user.send(`🛒 تفتح ليك الطلب **#${order.public_id}** فـ ${interaction.guild.name}: ${channel}`).catch(() => {});
-  await interaction.reply({ content: `✅ تفتح الطلب بنجاح: ${channel}`, ephemeral: true });
+  return safeReply(interaction, { content: `✅ تفتح الطلب بنجاح: ${channel}`, ephemeral: true });
 }
 
 async function publishMarketplaceMessage(message) {
@@ -233,20 +290,10 @@ async function handleCommand(interaction) {
         `✅ Verified Seller: ${s.verified_seller_role_id ? `<@&${s.verified_seller_role_id}>` : "غير محدد"}`,
       ].join("\n"), ephemeral: true });
     }
-    const maps = {
-      "shop-channel": ["shop_channel_id", "channel"],
-      "orders-category": ["orders_category_id", "category"],
-      "staff-role": ["staff_role_id", "role"],
-      "work-threads-channel": ["work_threads_channel_id", "channel"],
-      "reports-channel": ["reports_channel_id", "channel"],
-      "offers-channel": ["offers_channel_id", "channel"],
-      "seller-role": ["seller_role_id", "role"],
-      "verified-seller-role": ["verified_seller_role_id", "role"],
-    };
-    const [field, option] = maps[sub] || [];
-    const target = field ? interaction.options.get(option, true) : null;
-    if (!field || !target) return safeReply(interaction, { content: "❌ إعداد غير صالح.", ephemeral: true });
-    store.setSetting(guildId, field, target.id);
+
+    const target = settingTarget(interaction, sub);
+    if (!target) return safeReply(interaction, { content: "❌ الإعداد أو الاختيار غير صالح.", ephemeral: true });
+    store.setSetting(guildId, target.field, target.target.id);
     return safeReply(interaction, { content: `✅ تحفّظ الإعداد **${sub}** بنجاح.`, ephemeral: true });
   }
 
@@ -286,14 +333,51 @@ async function handleCommand(interaction) {
       if (!title || !description || !price) return safeReply(interaction, { content: "❌ بيانات العرض ناقصة.", ephemeral: true });
       if (imageUrl && !/^https?:\/\/\S+$/i.test(imageUrl)) return safeReply(interaction, { content: "❌ رابط الصورة غير صالح.", ephemeral: true });
       const publicId = store.nextPublicId(guildId, "offer_counter");
-      const sent = await interaction.reply({
-        embeds: [ui.offerEmbed({ publicId, title, description, price, category, seller: interaction.user, imageUrl })],
-        components: [ui.offerButtons(publicId, interaction.user.id)],
-        fetchReply: true,
-      });
-      store.createOffer({ guildId, publicId, sellerId: interaction.user.id, channelId: interaction.channel.id, messageId: sent.id, title, description, price, category, imageUrl, source: "command" });
-      return;
+      try {
+        const sent = await interaction.reply({
+          embeds: [ui.offerEmbed({ publicId, title, description, price, category, seller: interaction.user, imageUrl })],
+          components: [ui.offerButtons(publicId, interaction.user.id)],
+          fetchReply: true,
+        });
+        store.createOffer({ guildId, publicId, sellerId: interaction.user.id, channelId: interaction.channel.id, messageId: sent.id, title, description, price, category, imageUrl, source: "command" });
+        return;
+      } catch (error) {
+        console.error("[Shop] offer create error:", error);
+        return safeReply(interaction, { content: "❌ تعذر إنشاء العرض. تأكد من صلاحيات البوت وحاول من جديد.", ephemeral: true });
+      }
     }
+  }
+}
+
+async function createManualOrder(interaction, settings, type) {
+  if (store.hasOpenOrder(interaction.guild.id, interaction.user.id)) return safeReply(interaction, { content: "❌ عندك طلب مفتوح بالفعل.", ephemeral: true });
+  const channel = await interaction.guild.channels.create({
+    name: "order-new",
+    type: ChannelType.GuildText,
+    parent: settings.orders_category_id || null,
+    permissionOverwrites: [
+      { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+      ...(settings.staff_role_id ? [{ id: settings.staff_role_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }] : []),
+    ],
+  }).catch(error => { console.error("[Shop] manual order channel error:", error); return null; });
+  if (!channel) return safeReply(interaction, { content: "❌ تعذر إنشاء الطلب. راجع صلاحيات البوت.", ephemeral: true });
+  try {
+    const order = store.createOrder({ guildId: interaction.guild.id, channelId: channel.id, buyerId: interaction.user.id, orderType: type });
+    await channel.setName(`order-${order.public_id}`).catch(() => {});
+    await channel.send({ content: `<@${interaction.user.id}>`, embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`🛒 Order #${order.public_id}`).setDescription([
+      `👤 العميل: <@${order.buyer_id}>`,
+      `📂 النوع: **${ui.TYPE_NAMES[type]}**`,
+      "",
+      "كتب تفاصيل الطلب ديالك هنا، وفريق المتجر غادي يتابع معاك.",
+      "",
+      "📌 الحالة: **pending**",
+    ].join("\n")).setTimestamp()], components: [ui.orderControls(channel.id)], allowedMentions: { users: [interaction.user.id] } });
+    return safeReply(interaction, { content: `✅ تفتح الطلب ديالك: ${channel}`, ephemeral: true });
+  } catch (error) {
+    console.error("[Shop] manual order database/message error:", error);
+    await channel.delete().catch(() => {});
+    return safeReply(interaction, { content: "❌ وقع مشكل فحفظ الطلب. عاود المحاولة.", ephemeral: true });
   }
 }
 
@@ -304,22 +388,7 @@ async function handleInteraction(interaction) {
   if (interaction.isChatInputCommand()) return handleCommand(interaction);
 
   if (interaction.isStringSelectMenu() && interaction.customId === "shop_order_type") {
-    if (store.hasOpenOrder(interaction.guild.id, interaction.user.id)) return safeReply(interaction, { content: "❌ عندك طلب مفتوح بالفعل.", ephemeral: true });
-    const type = interaction.values[0];
-    const channel = await interaction.guild.channels.create({
-      name: `order-new`, type: ChannelType.GuildText, parent: settings.orders_category_id || null,
-      permissionOverwrites: [
-        { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-        { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-        ...(settings.staff_role_id ? [{ id: settings.staff_role_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }] : []),
-      ],
-    }).catch(() => null);
-    if (!channel) return safeReply(interaction, { content: "❌ تعذر إنشاء الطلب. راجع صلاحيات البوت.", ephemeral: true });
-    const order = store.createOrder({ guildId: interaction.guild.id, channelId: channel.id, buyerId: interaction.user.id, orderType: type });
-    await channel.setName(`order-${order.public_id}`).catch(() => {});
-    const { EmbedBuilder } = require("discord.js");
-    await channel.send({ content: `<@${interaction.user.id}>`, embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`🛒 Order #${order.public_id}`).setDescription([`👤 العميل: <@${order.buyer_id}>`,`📂 النوع: **${ui.TYPE_NAMES[type]}**`,"","كتب تفاصيل الطلب ديالك هنا، وفريق المتجر غادي يتابع معاك.","","📌 الحالة: **pending**"].join("\n")).setTimestamp()], components: [ui.orderControls(channel.id)], allowedMentions: { users: [interaction.user.id] } });
-    return safeReply(interaction, { content: `✅ تفتح الطلب ديالك: ${channel}`, ephemeral: true });
+    return createManualOrder(interaction, settings, interaction.values[0]);
   }
 
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("report_reason_")) {
@@ -357,7 +426,7 @@ async function handleInteraction(interaction) {
     const id = interaction.customId;
 
     if (id.startsWith("offer_order_")) {
-      const [, , publicId] = id.split("_");
+      const publicId = id.split("_")[2];
       const offer = store.getOffer(interaction.guild.id, publicId);
       if (!offer || offer.status !== "active") return safeReply(interaction, { content: "❌ هاد العرض ما بقاش متاح.", ephemeral: true });
       return createOrderFromOffer(interaction, offer);
@@ -375,9 +444,9 @@ async function handleInteraction(interaction) {
       const last = actionCooldowns.get(cdKey) || 0;
       if (Date.now() - last < settings.offer_action_cooldown_seconds * 1000) return safeReply(interaction, { content: "❌ صبّر شوية قبل إجراء آخر على نفس العرض.", ephemeral: true });
       actionCooldowns.set(cdKey, Date.now());
-      return safeReply(interaction, { content: `⚙️ إجراءات **Offer #${publicId}**`, components: [new (require("discord.js").ActionRowBuilder)().addComponents(
-        new (require("discord.js").ButtonBuilder)().setCustomId(`offer_delete_${publicId}`).setLabel("حذف العرض").setStyle(require("discord.js").ButtonStyle.Danger),
-        new (require("discord.js").ButtonBuilder)().setCustomId(`seller_profile_${sellerId}`).setLabel("ملف البائع").setStyle(require("discord.js").ButtonStyle.Secondary),
+      return safeReply(interaction, { content: `⚙️ إجراءات **Offer #${publicId}**`, components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`offer_delete_${publicId}`).setLabel("حذف العرض").setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`seller_profile_${sellerId}`).setLabel("ملف البائع").setStyle(ButtonStyle.Secondary),
       )], ephemeral: true });
     }
 
@@ -446,8 +515,10 @@ async function handleInteraction(interaction) {
           }
         }
       }
-      const updated = store.updateOrder(order.id, { status: "working", worker_id: interaction.user.id, work_thread_id: workThreadId || null, work_started_at: order.work_started_at || new Date().toISOString() });
-      return interaction.update({ embeds: [require("discord.js").EmbedBuilder.from(interaction.message.embeds[0]).setDescription(`${interaction.message.embeds[0]?.description || ""}\n\n🛠️ **تم استلام الطلب من <@${interaction.user.id}>**`)], components: [ui.orderControls(channelId)] });
+      store.updateOrder(order.id, { status: "working", worker_id: interaction.user.id, work_thread_id: workThreadId || null, work_started_at: order.work_started_at || new Date().toISOString() });
+      const old = interaction.message.embeds[0];
+      const embed = old ? EmbedBuilder.from(old).setDescription(`${old.description || ""}\n\n🛠️ **تم استلام الطلب من <@${interaction.user.id}>**`) : new EmbedBuilder().setTitle(`Order #${order.public_id}`);
+      return interaction.update({ embeds: [embed], components: [ui.orderControls(channelId)] });
     }
 
     if (id.startsWith("order_complete_") || id.startsWith("order_close_")) {
@@ -461,14 +532,18 @@ async function handleInteraction(interaction) {
       if (id.startsWith("order_complete_")) {
         if (!isStaff && !isSeller) return safeReply(interaction, { content: "❌ إتمام الطلب مخصص للبائع أو الستاف.", ephemeral: true });
         if (order.status === "completed") return safeReply(interaction, { content: "❌ الطلب مكتمل من قبل.", ephemeral: true });
-        const updated = store.updateOrder(order.id, { status: "completed", completed_at: new Date().toISOString() });
+        store.updateOrder(order.id, { status: "completed", completed_at: new Date().toISOString() });
         if (order.seller_id) store.incrementSeller(interaction.guild.id, order.seller_id, "completed_orders", 1);
-        return interaction.update({ embeds: [require("discord.js").EmbedBuilder.from(interaction.message.embeds[0]).setColor(0x57f287).setDescription(`${interaction.message.embeds[0]?.description || ""}\n\n✅ **تم إتمام الطلب.**`)], components: order.seller_id ? [ui.reviewButton(order.id)] : [] });
+        const old = interaction.message.embeds[0];
+        const embed = old ? EmbedBuilder.from(old).setColor(0x57f287).setDescription(`${old.description || ""}\n\n✅ **تم إتمام الطلب.**`) : new EmbedBuilder().setTitle(`Order #${order.public_id}`).setColor(0x57f287);
+        return interaction.update({ embeds: [embed], components: order.seller_id ? [ui.reviewButton(order.id)] : [] });
       }
-      const updated = store.updateOrder(order.id, { status: "closed", closed_at: new Date().toISOString() });
-      await interaction.update({ embeds: [require("discord.js").EmbedBuilder.from(interaction.message.embeds[0]).setColor(0x747f8d).setDescription(`${interaction.message.embeds[0]?.description || ""}\n\n🔒 **تم إغلاق الطلب.**`)], components: [] });
+      store.updateOrder(order.id, { status: "closed", closed_at: new Date().toISOString() });
+      const old = interaction.message.embeds[0];
+      const embed = old ? EmbedBuilder.from(old).setColor(0x747f8d).setDescription(`${old.description || ""}\n\n🔒 **تم إغلاق الطلب.**`) : new EmbedBuilder().setTitle(`Order #${order.public_id}`).setColor(0x747f8d);
+      await interaction.update({ embeds: [embed], components: [] });
       setTimeout(() => interaction.channel?.delete().catch(() => {}), 5000);
-      return updated;
+      return;
     }
 
     if (id.startsWith("order_review_")) {
@@ -497,10 +572,11 @@ async function handleInteraction(interaction) {
 async function registerAndStart() {
   await client.application.commands.set(commandDefinitions());
   client.on("interactionCreate", async interaction => {
-    try { await handleInteraction(interaction); }
-    catch (error) {
+    try {
+      await handleInteraction(interaction);
+    } catch (error) {
       console.error("[Shop] interaction error:", error);
-      await safeReply(interaction, { content: "❌ وقع خطأ غير متوقع. جرّب من جديد.", ephemeral: true });
+      await safeReply(interaction, { content: "❌ وقع خطأ غير متوقع. جرّب من جديد.\n\n🛠️ تم تسجيل الخطأ فالـconsole باش يتصلح.", ephemeral: true });
     }
   });
   client.on("messageCreate", async message => {
