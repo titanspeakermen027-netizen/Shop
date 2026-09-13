@@ -1,0 +1,31 @@
+{
+  "shopChannelId": "",
+  "ordersCategoryId": "",
+  "staffRoleId": "",
+  "orderCounter": 0,
+  "offersChannelId": "",
+  "offerCounter": 0,
+  "offerCategories": [
+    "product",
+    "design",
+    "programming"
+  ],
+  "reportsChannelId": "",
+  "reportCounter": 0,
+  "reportCooldownMinutes": 10,
+  "sellerRoleId": "",
+  "verifiedSellerRoleId": "",
+  "offerLogsChannelId": "",
+  "offerActionCooldownSeconds": 5,
+  "sellerDataFile": "data/sellers.json",
+  "sellerReviewsFile": "data/reviews.json",
+  "sellerProfileChannelId": "",
+  "ordersDataFile": "data/orders.json",
+  "marketplaceChannelIds": [],
+  "offersDataFile": "data/offers.json",
+  "orderWorkThreadsChannelId": "",
+  "marketplaceMentions": {
+    "type": "none",
+    "roleIds": []
+  }
+}
